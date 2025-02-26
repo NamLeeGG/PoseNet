@@ -6,7 +6,7 @@ import rootutils
 import numpy as np
 from omegaconf import DictConfig
 from lightning import LightningModule
-from src.loss.lossmodule import NME
+from src.loss.lossmodule import NME, ICLoss
 from torchmetrics import MinMetric, MeanMetric
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
@@ -47,7 +47,9 @@ class PoseNetModule(LightningModule):
         self.net = net
 
         # loss function
-        self.criterion = torch.nn.MSELoss()
+        # self.criterion = torch.nn.MSELoss()
+        self.criterion = ICLoss()
+
 
         # metric objects for calculating and averaging accuracy across batches
         self.train_acc = NME()
