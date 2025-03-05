@@ -24,22 +24,31 @@ def generate_heatmaps(image_size, keypoints, sigma=1.5):
 
 class BaseDataset(Dataset):
     def __init__(self):
-        self.img_files = self._parse_data()
+        self.img_files, self.annotations = self._parse_data()
         
     def __len__(self):
         return len(self.img_files)
     
     def __getitem__(self, index):
         img_file = self.img_files[index]
-        label_file = img_file.replace("images", "annotations").replace(".png", ".json")
+        annotation = self.annotations[index]
+        id = annotation['id']
+        assert img_file.split("/")[-1].split(".")[0] == id
+        label = annotation['annotations']
 
-        return img_file, label_file
+        return img_file, label
     
     def _parse_data(self):
         img_folder = "./data/images"
         img_files = sorted(os.listdir(img_folder))
         img_files = [os.path.join(img_folder, img_file) for img_file in img_files]
-        return img_files
+
+        annotation_files = "./data/default.json"
+        with open(annotation_files, "r", encoding="utf-8") as file:
+            annotations = json.load(file)
+        annotations = annotations['items']
+
+        return img_files, annotations
 
 
 class CervicalDataset(Dataset):
@@ -52,42 +61,17 @@ class CervicalDataset(Dataset):
         return self.dataset.__len__()
     
     def __getitem__(self, index):
-        img_file, label_file = self.dataset.__getitem__(index)
-
+        img_file, annotation = self.dataset.__getitem__(index)
         """get raw image"""
         img = cv2.imread(img_file)
+        if img is None:
+            raise FileNotFoundError(f"File {img_file} not found")
 
         """get raw label"""
-        with open(label_file, "r", encoding='utf-8') as f:
-            label = json.load(f)
-        label = label['shapes']
-        points = {}
-        for point in label:
-            points[point['label']] = point['points']
-        label = []
-        label.append(points['C2 centroid'][0])
-        label.append(points['C2 bottom left'][0])
-        label.append(points['C2 bottom right'][0])
-        label.append(points['C3 top left'][0])
-        label.append(points['C3 top right'][0])
-        label.append(points['C3 bottom left'][0])
-        label.append(points['C3 bottom right'][0])
-        label.append(points['C4 top left'][0])
-        label.append(points['C4 top right'][0])
-        label.append(points['C4 bottom left'][0])
-        label.append(points['C4 bottom right'][0])
-        label.append(points['C5 top left'][0])
-        label.append(points['C5 top right'][0])
-        label.append(points['C5 bottom left'][0])
-        label.append(points['C5 bottom right'][0])
-        label.append(points['C6 top left'][0])
-        label.append(points['C6 top right'][0])
-        label.append(points['C6 bottom left'][0])
-        label.append(points['C6 bottom right'][0])
-        label.append(points['C7 top left'][0])
-        label.append(points['C7 top right'][0])
-        label.append(points['C7 bottom left'][0])
-        label.append(points['C7 bottom right'][0])
+        label = [[] for _ in range(24)]
+
+        for point in annotation:
+            label[point['label_id']].extend(point['points'])
 
         """crop image"""
         min_x, min_y, max_x, max_y = 10000, 10000, 0, 0
@@ -97,11 +81,15 @@ class CervicalDataset(Dataset):
             max_x = max(max_x, point[0])
             max_y = max(max_y, point[1])
         
-        img = img[int(min_y-10):int(max_y+10), int(min_x-10):int(max_x+10)]
+        img = img[int(min_y-3):int(max_y+3), int(min_x-3):int(max_x+3)]
+
+        if img.shape[0] == 0 or img.shape[1] == 0:
+            print(min_x, min_y, max_x, max_y)
+            raise ValueError(f"Image {img_file} is empty")
 
         for i in range(len(label)):
-            label[i][0] = label[i][0] - min_x + 10
-            label[i][1] = label[i][1] - min_y + 10
+            label[i][0] = label[i][0] - min_x + 3
+            label[i][1] = label[i][1] - min_y + 3
 
 
         """final input tensor"""

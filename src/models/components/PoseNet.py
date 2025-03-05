@@ -145,7 +145,7 @@ class PoseNet(nn.Module):
         self.up2 = UpSampling(768, 256)
         self.up3 = UpSampling(384, 128)
         self.up4 = UpSampling(192, 64)
-        self.output_layer = nn.Conv2d(in_channels=64, out_channels=23, kernel_size=1)
+        self.output_layer = nn.Conv2d(in_channels=64, out_channels=24, kernel_size=1)
 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -161,7 +161,7 @@ class PoseNet(nn.Module):
         x5 = self.up2(torch.cat([x5, self.down3(x2, max_pool=False)], dim=1))   # [256,16,8]
         x5 = self.up3(torch.cat([x5, self.down2(x1, max_pool=False)], dim=1))   # [128,32,16]
         x5 = self.up4(torch.cat([x5, self.down1(x, max_pool=False)], dim=1))    # [64,64,32]
-        x5 = self.output_layer(x5) # [23,64,32]
+        x5 = self.output_layer(x5) # [24,64,32]
         
         return x5
 

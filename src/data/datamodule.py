@@ -67,7 +67,7 @@ class DataModule(LightningDataModule):
     def train_dataloader(self):
         def collate_fn(batch):
             images = torch.empty([0, 3, 256, 128])
-            labels = torch.empty([0, 23, 64, 32])
+            labels = torch.empty([0, 24, 64, 32])
             for (x1, y1), (x2, y2) in batch:
                 images = torch.cat((images, x1[None,:], x2[None,:]), dim=0)
                 labels = torch.cat((labels, y1[None,:], y2[None,:]), dim=0)
