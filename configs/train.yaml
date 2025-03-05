@@ -7,7 +7,7 @@ defaults:
   - data: data
   - model: model
   - callbacks: default
-  - logger: null # set logger here or use command line (e.g. `python train.py logger=tensorboard`)
+  - logger: wandb # changed from null to wandb for logging, change to tensorboard or null if needed
   - trainer: default
   - paths: default
   - extras: default
@@ -24,7 +24,7 @@ defaults:
   # it's optional since it doesn't need to exist and is excluded from version control
   - optional local: default
 
-  # debugging config (enable through command line, e.g. `python train.py debug=default)
+  # debugging config (enable through command line, e.g. `python train.py debug=default`)
   - debug: null
 
 # task name, determines output directory path
@@ -33,7 +33,7 @@ task_name: "train"
 # tags to help you identify your experiments
 # you can overwrite this in experiment configs
 # overwrite from command line with `python train.py tags="[first_tag, second_tag]"`
-tags: ["dev"]
+tags: ["pose_estimation", "cervical_spine"] # descriptive tags
 
 # set False to skip model training
 train: True
@@ -43,7 +43,8 @@ train: True
 test: True
 
 # simply provide checkpoint path to resume training
+# if no checkpoint is provided and test=True, testing will be skipped
 ckpt_path: null
 
 # seed for random number generators in pytorch, numpy and python.random
-seed: null
+seed: null # set a default seed for reproducibility, change if needed

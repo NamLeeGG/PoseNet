@@ -7,9 +7,47 @@ import numpy as np
 from omegaconf import DictConfig
 from lightning import LightningModule
 from src.loss.lossmodule import NME, ICLoss
-from torchmetrics import MinMetric, MeanMetric
+from torchmetrics import MinMetric, MeanMetric, Metric
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
+
+### Evaluation Metrics ###
+class FailureRate(Metric):
+    """Tỷ lệ lỗi khi NME vượt ngưỡng"""
+    def __init__(self, threshold=0.08):
+        super().__init__()
+        self.threshold = threshold
+        self.add_state("count_failures", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, preds: torch.Tensor, target: torch.Tensor):
+        d = torch.norm(target[:, 0, :] - target[:, 4, :], dim=1)
+        error = torch.norm(preds - target, dim=2).mean(dim=1) / d
+        self.count_failures += torch.sum(error > self.threshold)
+        self.total += preds.size(0)
+
+    def compute(self):
+        return self.count_failures / self.total
+
+class CED_AUC(Metric):
+    """Tính diện tích dưới đường cong CED"""
+    def __init__(self, max_threshold=0.1, num_bins=100):
+        super().__init__()
+        self.max_threshold = max_threshold
+        self.num_bins = num_bins
+        self.add_state("errors", default=[], dist_reduce_fx="cat")
+
+    def update(self, preds: torch.Tensor, target: torch.Tensor):
+        d = torch.norm(target[:, 0, :] - target[:, 4, :], dim=1)
+        error = torch.norm(preds - target, dim=2).mean(dim=1) / d
+        self.errors.append(error)
+
+    def compute(self):
+        errors = torch.cat(self.errors)
+        thresholds = torch.linspace(0, self.max_threshold, self.num_bins)
+        ced_curve = torch.tensor([(errors < t).float().mean() for t in thresholds])
+        auc = torch.trapz(ced_curve, thresholds)
+        return auc
 
 def get_keypoints_from_heatmaps(heatmaps):
     B, N, H, W = heatmaps.shape  # (batch_size, 23, 64, 32)
@@ -55,6 +93,8 @@ class PoseNetModule(LightningModule):
         self.train_acc = NME()
         self.val_acc = NME()
         self.test_acc = NME()
+        self.test_fr = FailureRate(threshold=0.08)
+        self.test_auc = CED_AUC(max_threshold=0.1, num_bins=100)
 
         # for averaging loss across batches
         self.train_loss = MeanMetric()
@@ -116,14 +156,20 @@ class PoseNetModule(LightningModule):
     def test_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> None:
         loss, preds, targets = self.model_step(batch)
 
-        # update and log metrics
         self.test_loss(loss)
         self.test_acc(preds, targets)
+        self.test_fr(preds, targets)
+        self.test_auc(preds, targets)
+
         self.log("test/loss", self.test_loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("test/acc", self.test_acc, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("test/nme", self.test_acc, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("test/failure_rate", self.test_fr, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("test/auc", self.test_auc, on_step=False, on_epoch=True, prog_bar=True)
 
     def on_test_epoch_end(self) -> None:
-        pass
+        self.log("test/nme_final", self.test_acc.compute(), sync_dist=True, prog_bar=True)
+        self.log("test/failure_rate_final", self.test_fr.compute(), sync_dist=True, prog_bar=True)
+        self.log("test/auc_final", self.test_auc.compute(), sync_dist=True, prog_bar=True)
 
     def setup(self, stage: str) -> None:
         if self.hparams.compile and stage == "fit":
