@@ -2,9 +2,9 @@
 
 defaults:
   - _self_
-  - data: mnist # choose datamodule with `test_dataloader()` for evaluation
-  - model: mnist
-  - logger: null
+  - data: data
+  - model: posenet_module
+  - logger: wandb # or keep null if you don't use logger
   - trainer: default
   - paths: default
   - extras: default
@@ -12,7 +12,7 @@ defaults:
 
 task_name: "eval"
 
-tags: ["dev"]
+tags: ["eval", "posenet"]
 
 # passing checkpoint path is necessary for evaluation
-ckpt_path: ???
+ckpt_path: "C:/Users/PC/OneDrive/Desktop/WORK/UET-VNU/TestPosenet/PoseNet/logs/train/runs/2025-03-10_22-38-16/checkpoints/epoch_026.ckpt"

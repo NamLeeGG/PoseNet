@@ -128,6 +128,7 @@ dmypy.json
 .pyre/
 
 ### VisualStudioCode
+.vs/
 .vscode/*
 !.vscode/settings.json
 !.vscode/tasks.json
@@ -148,6 +149,7 @@ dmypy.json
 configs/local/default.yaml
 /data/
 /logs/
+outputs/
 .env
 
 # Aim logging

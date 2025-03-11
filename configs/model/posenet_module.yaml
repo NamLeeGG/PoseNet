@@ -3,21 +3,19 @@ _target_: src.models.posenet_module.PoseNetModule
 optimizer:
   _target_: torch.optim.Adam
   _partial_: true
-  lr: 0.01
-  betas:
-    - 0.9
-    - 0.999
-  weight_decay: 0.00001
+  lr: 0.001                  
+  betas: [0.9, 0.999]        
+  weight_decay: 0.0005       
 
 scheduler:
   _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
   _partial_: true
   mode: min
   factor: 0.1
-  patience: 10
+  patience: 5                
 
 net:
-  _target_: src.models.components.PoseNet.PoseNet
+  _target_: src.models.components.PoseNet.PoseNet  
 
-# compile model for faster training with pytorch 2.0
 compile: false
+

@@ -6,7 +6,7 @@ import rootutils
 import numpy as np
 from omegaconf import DictConfig
 from lightning import LightningModule
-from src.loss.lossmodule import NME, ICLoss
+from src.loss.lossmodule import ICLoss
 from torchmetrics import MinMetric, MeanMetric, Metric
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
@@ -48,6 +48,24 @@ class CED_AUC(Metric):
         ced_curve = torch.tensor([(errors < t).float().mean() for t in thresholds])
         auc = torch.trapz(ced_curve, thresholds)
         return auc
+
+class NME(Metric):
+    def __init__(self):
+        super().__init__()
+        self.add_state("sum_nme", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, preds: torch.Tensor, target: torch.Tensor):
+        nme = torch.sum((preds - target) ** 2, dim=1).sqrt().sum()
+        self.sum_nme += nme
+        self.total += preds.size(0)
+
+    def compute(self):
+        return self.sum_nme / self.total
+
+    def reset(self):
+        self.sum_nme = torch.tensor(0.0)
+        self.total = torch.tensor(0)
 
 def get_keypoints_from_heatmaps(heatmaps):
     B, N, H, W = heatmaps.shape  # (batch_size, 23, 64, 32)

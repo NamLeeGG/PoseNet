@@ -1,138 +1,83 @@
-import math
 import torch
-from torch import nn
+import torch.nn as nn
 from torchmetrics import Metric
+import math
 
-# classification mask
-def L(heatmap, theta_BG=0.4, theta_FG=0.9):
-    return torch.where(
-        (heatmap >= 0) & (heatmap < theta_BG), 0,
-        torch.where((heatmap >= theta_BG) & (heatmap < theta_FG), 1, 0)
-    )
-
-# cross-entropy loss for classification
-def CE(pred, target, theta_BG=0.4, theta_FG=0.9):
-    L_target = L(target, theta_BG, theta_FG)
-    L_pred = L(pred, theta_BG, theta_FG)
-    return -(L_target * torch.log(target + 1e-6) + L_pred * torch.log(pred + 1e-6))
-
-# weighting func
-def omega(pred, target, theta_BG=0.4, theta_FG=0.9):
-    cross_entropy = CE(pred, target, theta_BG, theta_FG)
-    return torch.where(cross_entropy == 0, 0, 1)
-
-# scaling factors for FG and CF regions
-def calc_magnitude(target, theta_BG=0.4, theta_FG=0.9):
-    area_BG = torch.sum((target >= 0) & (target <= theta_BG), dim=(2, 3), keepdim=True)
-    area_FG = torch.sum((target > theta_BG) & (target <= theta_FG), dim=(2, 3), keepdim=True)
-    area_CF = torch.sum(target > theta_FG, dim=(2, 3), keepdim=True)
-
-    omega_FG = area_BG / (area_FG + 1e-6)
-    omega_CF = area_BG / (area_CF + 1e-6)
-    
-    return omega_FG, omega_CF
-
-# absolute difference 
-def delta(pred, target):
-    return torch.abs(target - pred)
-
-# intensity map func
-def intensity_map_function(target, l_b, h_b):
-    return ((target >= l_b) & (target < h_b)).float()
-
-### LOSS FUNCTIONS ###
-
-# background loss
-def LBG(pred, target, alpha=0.5, C1=-0.125, phi_BG=0.5):
-    delta_ = delta(pred, target)
-    return torch.where(delta_ > phi_BG, delta_ ** 2, alpha * (delta_ ** 2) + C1)
-
-# foreground loss
-def LFG(pred, target, C2=-0.5, phi_FG=0.5):
-    delta_ = delta(pred, target)
-    return torch.where(delta_ > phi_FG, delta_ ** 2, delta_ + C2)
-
-# core-foreground loss
-def LCF(pred, target, beta=4, phi_1_CF=0.5, phi_2_CF=0.05):
-    delta_ = delta(pred, target)
-    C3 = phi_2_CF - beta * math.log(1 + phi_2_CF)
-    C4 = beta * math.log(1 + phi_1_CF) - beta * math.log(1 + phi_2_CF) - phi_1_CF**2 + phi_2_CF
-
-    return torch.where(
-        delta_ > phi_1_CF, delta_ ** 2,
-        torch.where(delta_ > phi_2_CF, beta * torch.log(1 + delta_) + C3, delta_ + C4)
-    )
-
-# total loss
-
-def Loss_BG(pred, target, alpha=0.5, C1=-0.125, phi_BG=0.5, theta_BG=0.4):
-    intensity_map = intensity_map_function(target, 0, theta_BG)
-    loss = LBG(pred, target, alpha, C1, phi_BG) * intensity_map
-    return loss.mean()
-
-def Loss_FG(pred, target, C2=-0.5, phi_FG=0.5, theta_BG=0.4, theta_FG=0.9):
-    omega_FG, _ = calc_magnitude(target, theta_BG, theta_FG)
-    intensity_map = intensity_map_function(target, theta_BG, theta_FG)
-    loss = LFG(pred, target, C2, phi_FG) * omega_FG.unsqueeze(-1).unsqueeze(-1) * intensity_map
-    return loss.mean()
-
-def Loss_CF(pred, target, beta=4, phi_1_CF=0.5, phi_2_CF=0.05, theta_BG=0.4, theta_FG=0.9):
-    _, omega_CF = calc_magnitude(target, theta_BG, theta_FG)
-    intensity_map = intensity_map_function(target, theta_FG, 1)
-    loss = LCF(pred, target, beta, phi_1_CF, phi_2_CF) * omega_CF.unsqueeze(-1).unsqueeze(-1) * intensity_map
-    
-    return loss.mean()
-
-### CATEGORICAL LOSS FUNC ###
-def CLoss_BG(pred, target, alpha=0.5, C1=-0.125, phi_BG=0.5, theta_BG=0.4, theta_FG=0.9):
-    intensity_map_target = intensity_map_function(target, 0, theta_BG)
-    intensity_map_pred = intensity_map_function(pred, 0, theta_BG)
-    valid_map = intensity_map_target * intensity_map_pred
-    loss = LBG(pred, target, alpha, C1, phi_BG) * omega(pred, target, theta_BG, theta_FG) * valid_map
-    return loss.mean()
-
-def CLoss_FG(pred, target, C2=-0.5, phi_FG=0.5, theta_BG=0.4, theta_FG=0.9):
-    intensity_map_target = intensity_map_function(target, theta_BG, theta_FG)
-    intensity_map_pred = intensity_map_function(pred, theta_BG, theta_FG)
-    valid_map = intensity_map_target * intensity_map_pred
-    loss = LFG(pred, target, C2, phi_FG) * omega(pred, target, theta_BG, theta_FG) * valid_map
-    return loss.mean()
-
-### FINAL IC-LOSS FUNC ###
-def IC_Loss(pred, target, alpha=0.5, beta=4, C1=-0.125, C2=-0.5, phi_BG=0.5, phi_FG=0.5, phi_1_CF=0.5, phi_2_CF=0.05, theta_BG=0.4, theta_FG=0.9):
-    return (
-        CLoss_BG(pred, target, alpha, C1, phi_BG, theta_BG, theta_FG)
-        + CLoss_FG(pred, target, C2, phi_FG, theta_BG, theta_FG)
-        + Loss_CF(pred, target, beta, phi_1_CF, phi_2_CF, theta_BG, theta_FG)
-    )
-
-### WRAPPING IC-LOSS ###
 class ICLoss(nn.Module):
-    def __init__(self, **kwargs):
+    def __init__(self, theta_bg=0.4, theta_fg=0.9, phi_bg=0.5, phi_fg=0.5, phi1_cf=0.5, phi2_cf=0.05, alpha=0.5, beta=4.0):
         super(ICLoss, self).__init__()
-        self.params = kwargs
+        self.theta_bg = theta_bg
+        self.theta_fg = theta_fg
+        self.phi_bg = phi_bg
+        self.phi_fg = phi_fg
+        self.phi1_cf = phi1_cf
+        self.phi2_cf = phi2_cf
+        self.alpha = alpha
+        self.beta = beta
 
     def forward(self, pred, target):
-        return IC_Loss(pred, target, **self.params)
+        return ic_loss(pred, target, self.theta_bg, self.theta_fg, self.phi_bg,
+                       self.phi_fg, self.phi1_cf, self.phi2_cf, self.alpha, self.beta)
 
-### NME ###
-class NME(Metric):
-    def __init__(self):
-        super().__init__()
-        self.add_state("sum_nme", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
+# create region masks
+def get_region_masks(target, theta_bg, theta_fg):
+    mask_bg = (target <= theta_bg).float()
+    mask_fg = ((target > theta_bg) & (target <= theta_fg)).float()
+    mask_cf = (target > theta_fg).float()
+    return mask_bg, mask_fg, mask_cf
 
-    def update(self, preds: torch.Tensor, target: torch.Tensor):
-        nme = torch.sum((preds - target) ** 2, dim=1).sqrt().sum()
-        self.sum_nme += nme
-        self.total += preds.size(0)
+# compute piecewise losses
+def compute_piecewise_losses(diff, phi_bg, phi_fg, phi1_cf, phi2_cf, alpha, beta):
+    C1 = 0.5 * (phi_bg ** 2) * (1 - alpha)
+    L_BG = torch.where(diff > phi_bg, 0.5 * diff ** 2, alpha * 0.5 * diff ** 2 + C1)
 
-    def compute(self):
-        return self.sum_nme / self.total
+    C2 = 0.5 * (phi_fg ** 2) - phi_fg
+    L_FG = torch.where(diff > phi_fg, 0.5 * diff ** 2, diff + C2)
 
-    def reset(self):
-        self.sum_nme = torch.tensor(0.0)
-        self.total = torch.tensor(0)
+    C3 = phi2_cf - beta * math.log(1 + phi2_cf)
+    C4 = beta * math.log(1 + phi1_cf) - beta * math.log(1 + phi2_cf) - 0.5 * phi1_cf ** 2 + phi2_cf
+    L_CF = torch.where(
+        diff > phi1_cf, 0.5 * diff ** 2,
+        torch.where(diff > phi2_cf, beta * torch.log(1 + diff) + C3, diff + C4)
+    )
+
+    return L_BG, L_FG, L_CF
+
+# compute misclassification mask
+def compute_misclassification_mask(pred, target, theta_bg, mask_bg, mask_fg):
+    gt_class = torch.zeros_like(target)
+    gt_class[mask_fg.bool()] = 1
+    pred_class = (pred > theta_bg).float()
+    delta = (pred_class != gt_class).float()
+    return delta * (mask_bg + mask_fg)
+
+# compute region-wise weights
+def compute_region_weights(mask_bg, mask_fg, mask_cf):
+    num_bg = mask_bg.sum(dim=(1, 2, 3), keepdim=True)
+    num_fg = mask_fg.sum(dim=(1, 2, 3), keepdim=True)
+    num_cf = mask_cf.sum(dim=(1, 2, 3), keepdim=True)
+    omega_fg = num_bg / (num_fg + 1e-8)
+    omega_cf = num_bg / (num_cf + 1e-8)
+    return omega_fg, omega_cf
+
+# main loss computation function
+def ic_loss(pred, target, theta_bg, theta_fg, phi_bg, phi_fg, phi1_cf, phi2_cf, alpha, beta):
+    diff = (pred - target).abs()
+
+    mask_bg, mask_fg, mask_cf = get_region_masks(target, theta_bg, theta_fg)
+    L_BG, L_FG, L_CF = compute_piecewise_losses(diff, phi_bg, phi_fg, phi1_cf, phi2_cf, alpha, beta)
+    omega_fg, omega_cf = compute_region_weights(mask_bg, mask_fg, mask_cf)
+    delta = compute_misclassification_mask(pred, target, theta_bg, mask_bg, mask_fg)
+
+    CLossBG = (mask_bg * delta * L_BG).sum(dim=(1, 2, 3))
+    CLossFG = (mask_fg * delta * L_FG).sum(dim=(1, 2, 3)) * omega_fg
+    LossCF = (mask_cf * L_CF).sum(dim=(1, 2, 3)) * omega_cf
+
+    total_pixels = pred.shape[1] * pred.shape[2] * pred.shape[3]
+
+    IC_loss = (CLossBG + CLossFG + LossCF) / total_pixels
+
+    return IC_loss.mean()
 
 if __name__ == "__main__":
     pass
