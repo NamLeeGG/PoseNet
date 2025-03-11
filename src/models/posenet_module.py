@@ -85,8 +85,8 @@ class PoseNetModule(LightningModule):
         self.net = net
 
         # loss function
-        # self.criterion = torch.nn.MSELoss()
-        self.criterion = ICLoss()
+        self.criterion = torch.nn.MSELoss()
+        # self.criterion = ICLoss()
 
 
         # metric objects for calculating and averaging accuracy across batches

@@ -131,4 +131,5 @@ def main(cfg: DictConfig) -> Optional[float]:
 
 
 if __name__ == "__main__":
+    wandb.login(key = '65f5d63dba6bb11e5e8b27ee37519ce1168b1729')
     main()

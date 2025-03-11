@@ -12,13 +12,13 @@ from lightning import LightningDataModule
 
 @hydra.main(version_base="1.3", config_path="./configs/data", config_name="data")
 def main(cfg: DictConfig) -> Optional[float]:
-    ckpt_path = 'ckpt_path'
+    ckpt_path = './logs/train/runs/2025-03-07_16-58-13/checkpoints/epoch_116.ckpt'
     model = PoseNetModule.load_from_checkpoint(net = PoseNet(), checkpoint_path = ckpt_path)
     model.eval()
     
     datamodule: LightningDataModule = hydra.utils.instantiate(config=cfg)
     datamodule.setup()
-    test_loader = datamodule.test_dataloader()
+    test_loader = datamodule.data_test
     os.makedirs("inference", exist_ok=True)
     for idx, sample in enumerate(test_loader):
         img, gt = sample
@@ -30,11 +30,11 @@ def main(cfg: DictConfig) -> Optional[float]:
 
         for i in range(gt.shape[0]):
             id = np.unravel_index(np.argmax(gt[i]), gt[i].shape)
-            img = cv2.circle(img, (id[1]*4, id[0]*4), 2, (255, 0, 0), -1)
+            img = cv2.circle(img, (id[1]*4, id[0]*4), 1, (255, 0, 0), -1) # blue
 
         for i in range(pred.shape[0]):
             id = np.unravel_index(np.argmax(pred[i]), pred[i].shape)
-            img = cv2.circle(img, (id[1]*4, id[0]*4), 2, (0, 0, 255), -1)
+            img = cv2.circle(img, (id[1]*4, id[0]*4), 1, (0, 0, 255), 1) # red
         
         cv2.imwrite(f"inference/test{idx}.png", img)
 
