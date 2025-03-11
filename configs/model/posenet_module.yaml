@@ -19,3 +19,23 @@ net:
 
 compile: false
 
+# _target_: src.models.posenet_module.PoseNetModule
+
+# optimizer:
+#   _target_: ${model.optimizer._target_}  # Hydra will override this
+#   _partial_: true
+#   lr: ${model.optimizer.lr}  # Learning rate tuned by Optuna
+#   betas: [0.9, 0.999]        
+#   weight_decay: ${model.optimizer.weight_decay}  # Weight decay tuned
+
+# scheduler:
+#   _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+#   _partial_: true
+#   mode: min
+#   factor: ${model.scheduler.factor}  # Tuned by Optuna
+#   patience: ${model.scheduler.patience}  # Tuned by Optuna
+
+# net:
+#   _target_: src.models.components.PoseNet.PoseNet  
+
+# compile: false

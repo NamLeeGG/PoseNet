@@ -11,44 +11,51 @@ from torchmetrics import MinMetric, MeanMetric, Metric
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
-### Evaluation Metrics ###
+### Failure Rate Metric ###
 class FailureRate(Metric):
-    """Tỷ lệ lỗi khi NME vượt ngưỡng"""
+    """Failure Rate (FR) when NME exceeds threshold"""
     def __init__(self, threshold=0.08):
         super().__init__()
         self.threshold = threshold
-        self.add_state("count_failures", default=torch.tensor(0), dist_reduce_fx="sum")
-        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.add_state("count_failures", default=torch.tensor(0, dtype=torch.float32), dist_reduce_fx="sum")
+        self.add_state("total", default=torch.tensor(0, dtype=torch.float32), dist_reduce_fx="sum")
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
-        d = torch.norm(target[:, 0, :] - target[:, 4, :], dim=1)
-        error = torch.norm(preds - target, dim=2).mean(dim=1) / d
+        # Compute normalizing distance (with epsilon to avoid div by zero)
+        d = torch.norm(target[:, 0, :] - target[:, 4, :], dim=1) + 1e-6  # Ref: Eq.18, Page 59422
+
+        # Compute normalized error per landmark and average over all landmarks
+        error = torch.norm(preds - target, dim=2) / d.unsqueeze(1)
+        error = error.mean(dim=1)  # Mean across landmarks
+
         self.count_failures += torch.sum(error > self.threshold)
         self.total += preds.size(0)
 
     def compute(self):
         return self.count_failures / self.total
 
+
+### Cumulative Error Distribution (CED) and AUC Metric ###
 class CED_AUC(Metric):
-    """Tính diện tích dưới đường cong CED"""
+    """Computes the Area Under the Cumulative Error Distribution (CED) Curve"""
     def __init__(self, max_threshold=0.1, num_bins=100):
         super().__init__()
         self.max_threshold = max_threshold
         self.num_bins = num_bins
-        self.add_state("errors", default=[], dist_reduce_fx="cat")
+        self.add_state("errors", default=torch.tensor([], dtype=torch.float32), dist_reduce_fx="cat")
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
-        d = torch.norm(target[:, 0, :] - target[:, 4, :], dim=1)
+        d = torch.norm(target[:, 0, :] - target[:, 4, :], dim=1) + 1e-6
         error = torch.norm(preds - target, dim=2).mean(dim=1) / d
-        self.errors.append(error)
+        self.errors = torch.cat([self.errors, error], dim=0)
 
     def compute(self):
-        errors = torch.cat(self.errors)
         thresholds = torch.linspace(0, self.max_threshold, self.num_bins)
-        ced_curve = torch.tensor([(errors < t).float().mean() for t in thresholds])
-        auc = torch.trapz(ced_curve, thresholds)
-        return auc
+        ced_curve = (self.errors.unsqueeze(0) < thresholds.unsqueeze(1)).float().mean(dim=1)
+        return torch.trapz(ced_curve, thresholds)
 
+
+### Normalized Mean Error (NME) Metric ###
 class NME(Metric):
     def __init__(self):
         super().__init__()
@@ -56,34 +63,38 @@ class NME(Metric):
         self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
-        nme = torch.sum((preds - target) ** 2, dim=1).sqrt().sum()
+        nme = torch.norm(preds - target, dim=2).mean(dim=1).sum()  # Ref: Eq.18, Page 59422
         self.sum_nme += nme
         self.total += preds.size(0)
 
     def compute(self):
         return self.sum_nme / self.total
 
-    def reset(self):
-        self.sum_nme = torch.tensor(0.0)
-        self.total = torch.tensor(0)
+def get_keypoints_from_heatmaps(heatmaps: torch.Tensor) -> torch.Tensor:
+    """
+    Extract keypoints from heatmaps using argmax.
+    :param heatmaps: (B, N, H, W) tensor where N is number of landmarks.
+    :return: (B, N, 2) tensor with keypoint coordinates (x, y).
+    """
+    B, N, H, W = heatmaps.shape  
+    idxs = torch.argmax(heatmaps.reshape(B, N, -1), dim=2)  # Use PyTorch argmax
+    y, x = torch.div(idxs, W, rounding_mode='floor'), idxs % W  # Convert to (x, y)
+    keypoints_tensor = torch.stack((x, y), dim=2).float()  # Stack into (B, N, 2)
+    return keypoints_tensor
 
-def get_keypoints_from_heatmaps(heatmaps):
-    B, N, H, W = heatmaps.shape  # (batch_size, 23, 64, 32)
-    idxs = np.argmax(heatmaps.reshape(B, N, -1).detach().cpu(), axis=2)
-    y, x = np.unravel_index(idxs, (H, W))  # (B, N), (B, N)
-    keypoints_np = np.stack((x, y), axis=2)
-    keypoints_tensor = torch.tensor(keypoints_np, dtype=torch.float32)
-    return keypoints_tensor  # (batch_size, 23, 2)
+def normalize_keypoints(keypoints: torch.Tensor) -> torch.Tensor:
+    """
+    Normalize keypoints using Min-Max scaling per sample.
+    :param keypoints: (B, N, 2) tensor of keypoints.
+    :return: Normalized keypoints.
+    """
+    x_min = keypoints[:, :, 0].min(dim=1, keepdim=True)[0]
+    x_max = keypoints[:, :, 0].max(dim=1, keepdim=True)[0]
+    y_min = keypoints[:, :, 1].min(dim=1, keepdim=True)[0]
+    y_max = keypoints[:, :, 1].max(dim=1, keepdim=True)[0]
 
-def normalize_keypoints(keypoints):    
-    # Tính min và max cho x và y
-    x_min = keypoints[:, :, 0].min()
-    x_max = keypoints[:, :, 0].max()
-    y_min = keypoints[:, :, 1].min()
-    y_max = keypoints[:, :, 1].max()
-    # Chuẩn hóa theo công thức Min-Max
-    keypoints[:, :, 0] = 2 * (keypoints[:, :, 0] - x_min) / (x_max - x_min) - 1
-    keypoints[:, :, 1] = 2 * (keypoints[:, :, 1] - y_min) / (y_max - y_min) - 1
+    keypoints[:, :, 0] = 2 * (keypoints[:, :, 0] - x_min) / (x_max - x_min + 1e-6) - 1
+    keypoints[:, :, 1] = 2 * (keypoints[:, :, 1] - y_min) / (y_max - y_min + 1e-6) - 1
     return keypoints
 
 class PoseNetModule(LightningModule):
