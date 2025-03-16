@@ -166,3 +166,7 @@ Thumbs.db
 *.onnx
 *.csv
 *.jsonl
+
+# Exclude outputs and inference folders
+outputs/
+inference/
