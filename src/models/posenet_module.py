@@ -50,12 +50,12 @@ class CED_AUC(Metric):
         return auc
 
 def get_keypoints_from_heatmaps(heatmaps):
-    B, N, H, W = heatmaps.shape  # (batch_size, 23, 64, 32)
+    B, N, H, W = heatmaps.shape  # (batch_size, 24, 64, 32)
     idxs = np.argmax(heatmaps.reshape(B, N, -1).detach().cpu(), axis=2)
     y, x = np.unravel_index(idxs, (H, W))  # (B, N), (B, N)
     keypoints_np = np.stack((x, y), axis=2)
     keypoints_tensor = torch.tensor(keypoints_np, dtype=torch.float32)
-    return keypoints_tensor  # (batch_size, 23, 2)
+    return keypoints_tensor  # (batch_size, 24, 2)
 
 def normalize_keypoints(keypoints):    
     # Tính min và max cho x và y

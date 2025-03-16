@@ -41,7 +41,7 @@ class DataModule(LightningDataModule):
 
     @property
     def num_classes(self) -> int:
-        return 23
+        return 24
 
     def prepare_data(self) -> None:
         pass

@@ -33,7 +33,8 @@ class BaseDataset(Dataset):
         img_file = self.img_files[index]
         annotation = self.annotations[index]
         id = annotation['id']
-        assert img_file.split("/")[-1].split(".")[0] == id
+        img_filename = os.path.splitext(os.path.basename(img_file))[0]
+        assert img_filename == id, f"Filename {img_filename} does not match ID {id}"
         label = annotation['annotations']
 
         return img_file, label

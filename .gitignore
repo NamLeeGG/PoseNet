@@ -127,7 +127,8 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-### VisualStudioCode
+### VisualStudio/ VisualStudioCode
+.vs/
 .vscode/*
 !.vscode/settings.json
 !.vscode/tasks.json
@@ -152,3 +153,16 @@ configs/local/default.yaml
 
 # Aim logging
 .aim
+
+# OS/Editor files
+.DS_Store
+Thumbs.db
+*.sublime-workspace
+*.sublime-project
+
+# Data/models
+*.pth
+*.pt
+*.onnx
+*.csv
+*.jsonl
