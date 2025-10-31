@@ -1,136 +1,202 @@
-from typing import Any, Dict, Optional, Tuple
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
-import hydra
-import rootutils
-import albumentations as A
-from omegaconf import DictConfig
 from lightning import LightningDataModule
-from torch.utils.data import DataLoader, Dataset, random_split
-from src.data.components.dataset import BaseDataset, CervicalDataset
-import cv2
-import numpy as np
+from torch.utils.data import DataLoader
 
-rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
+from src.data.components.dataset import (
+    CervicalJSONDataset,
+    SampleRecord,
+    load_cervical_json_annotations,
+)
 
-def train_collate_fn(batch):
-    images = torch.empty([0, 3, 256, 128])
-    labels = torch.empty([0, 24, 64, 32])
-    for (x1, y1), (x2, y2) in batch:
-        images = torch.cat((images, x1[None, :], x2[None, :]), dim=0)
-        labels = torch.cat((labels, y1[None, :], y2[None, :]), dim=0)
-    return images, labels
 
-class DataModule(LightningDataModule):
+class CervicalJSONDataModule(LightningDataModule):
+    """LightningDataModule orchestrating loading and batching of cervical JSON data."""
+
     def __init__(
         self,
-        train_test_split: Tuple[float, float] = (0.9, 0.1),
-        train_batch_size: int = 32,
-        test_batch_size: int = 64,
+        data_dir: str,
+        json_file: str = "default.json",
+        images_subdir: str = "images",
+        batch_size: int = 60,
         num_workers: int = 4,
-        train_transforms: Optional[A.Compose] = None,
-        test_transforms: Optional[A.Compose] = None,
+        img_size: Sequence[int] = (256, 128),
+        heatmap_size: Sequence[int] = (64, 32),
+        sigma: float = 1.5,
+        train_val_test_split: Sequence[float] = (0.8, 0.1, 0.1),
+        use_flip: bool = True,
+        use_hist_eq: bool = True,
         pin_memory: bool = False,
+        persistent_workers: bool = False,
+        drop_last: bool = False,
+        seed: int = 42,
+        num_landmarks: Optional[int] = None,
     ) -> None:
         super().__init__()
 
         self.save_hyperparameters(logger=False)
 
-        self.train_transforms = train_transforms
-        self.test_transforms = test_transforms
+        self.data_train: Optional[CervicalJSONDataset] = None
+        self.data_val: Optional[CervicalJSONDataset] = None
+        self.data_test: Optional[CervicalJSONDataset] = None
 
-        self.data_train: Optional[Dataset] = None
-        self.data_val: Optional[Dataset] = None
-        self.data_test: Optional[Dataset] = None
-
-        self.train_batch_size_per_device = train_batch_size
-        self.test_batch_size_per_device = test_batch_size
+        self._num_landmarks: Optional[int] = num_landmarks
+        self._img_size = (int(img_size[0]), int(img_size[1]))
+        self._heatmap_size = (int(heatmap_size[0]), int(heatmap_size[1]))
 
     @property
-    def num_classes(self) -> int:
-        return 23
+    def num_landmarks(self) -> int:
+        if self._num_landmarks is None:
+            raise RuntimeError("DataModule has not been setup yet; num_landmarks is unavailable.")
+        return self._num_landmarks
 
-    def prepare_data(self) -> None:
-        pass
+    def prepare_data(self) -> None:  # pragma: no cover - no external downloads required
+        data_dir = Path(self.hparams.data_dir).expanduser().resolve()
+        json_path = data_dir / self.hparams.json_file
+        images_dir = data_dir / self.hparams.images_subdir
+        if not json_path.is_file():
+            raise FileNotFoundError(f"Annotation file '{json_path}' does not exist.")
+        if not images_dir.is_dir():
+            raise FileNotFoundError(f"Images directory '{images_dir}' does not exist.")
 
     def setup(self, stage: Optional[str] = None) -> None:
-        if self.trainer is not None:
-            world_size = self.trainer.world_size
-            if self.hparams.train_batch_size % world_size != 0:
-                raise RuntimeError(
-                    f"Batch size ({self.hparams.train_batch_size}) not divisible by devices ({world_size})."
-                )
-            self.train_batch_size_per_device = self.hparams.train_batch_size // world_size
-            self.test_batch_size_per_device = self.hparams.test_batch_size // world_size
+        if self.data_train is not None and self.data_val is not None and self.data_test is not None:
+            return
 
-        if not self.data_train and not self.data_val and not self.data_test:
-            dataset = BaseDataset()
-            trainset, testset = random_split(
-                dataset,
-                self.hparams.train_test_split,
-                generator=torch.Generator().manual_seed(42)
+        data_dir = Path(self.hparams.data_dir).expanduser().resolve()
+        samples = load_cervical_json_annotations(data_dir, self.hparams.json_file, self.hparams.images_subdir)
+
+        if not samples:
+            raise RuntimeError(f"No samples discovered in '{data_dir}'.")
+
+        discovered_landmarks = samples[0].landmarks.shape[0]
+        if self._num_landmarks is None:
+            self._num_landmarks = discovered_landmarks
+        elif self._num_landmarks != discovered_landmarks:
+            raise ValueError(
+                f"Configured num_landmarks={self._num_landmarks} but dataset provides {discovered_landmarks}."
             )
-            self.data_train = CervicalDataset(dataset=trainset, mode='train', transform=self.train_transforms)
-            self.data_val = CervicalDataset(dataset=testset, mode='val', transform=self.test_transforms)
-            self.data_test = CervicalDataset(dataset=testset, mode='test', transform=self.test_transforms)
 
-    def train_dataloader(self):
-        return DataLoader(
-            dataset=self.data_train,
-            batch_size=self.train_batch_size_per_device,
-            num_workers=self.hparams.num_workers,
-            pin_memory=self.hparams.pin_memory,
-            shuffle=True,
-            collate_fn=train_collate_fn,
-            persistent_workers=True,
+        splits = self._compute_split_lengths(len(samples), list(self.hparams.train_val_test_split))
+        generator = torch.Generator().manual_seed(self.hparams.seed)
+        indices = torch.randperm(len(samples), generator=generator).tolist()
+
+        subsets: List[List[SampleRecord]] = []
+        cursor = 0
+        for length in splits:
+            subset_indices = indices[cursor : cursor + length]
+            subsets.append([samples[i] for i in subset_indices])
+            cursor += length
+
+        sigma = float(self.hparams.sigma)
+        use_hist_eq = bool(self.hparams.use_hist_eq)
+
+        train_samples, val_samples, test_samples = subsets
+        self.data_train = CervicalJSONDataset(
+            train_samples,
+            split="train",
+            img_size=self._img_size,
+            heatmap_size=self._heatmap_size,
+            sigma=sigma,
+            use_flip=bool(self.hparams.use_flip),
+            use_hist_eq=use_hist_eq,
+        )
+        self.data_val = CervicalJSONDataset(
+            val_samples,
+            split="val",
+            img_size=self._img_size,
+            heatmap_size=self._heatmap_size,
+            sigma=sigma,
+            use_flip=False,
+            use_hist_eq=use_hist_eq,
+        )
+        self.data_test = CervicalJSONDataset(
+            test_samples,
+            split="test",
+            img_size=self._img_size,
+            heatmap_size=self._heatmap_size,
+            sigma=sigma,
+            use_flip=False,
+            use_hist_eq=use_hist_eq,
         )
 
-    def val_dataloader(self):
+    def train_dataloader(self) -> DataLoader:
+        if self.data_train is None:
+            raise RuntimeError("DataModule.setup() must be called before accessing the train dataloader.")
+        return self._build_dataloader(self.data_train, shuffle=True, drop_last=self.hparams.drop_last)
+
+    def val_dataloader(self) -> DataLoader:
+        if self.data_val is None:
+            raise RuntimeError("DataModule.setup() must be called before accessing the val dataloader.")
+        return self._build_dataloader(self.data_val, shuffle=False, drop_last=False)
+
+    def test_dataloader(self) -> DataLoader:
+        if self.data_test is None:
+            raise RuntimeError("DataModule.setup() must be called before accessing the test dataloader.")
+        return self._build_dataloader(self.data_test, shuffle=False, drop_last=False)
+
+    def _build_dataloader(
+        self,
+        dataset: CervicalJSONDataset,
+        *,
+        shuffle: bool,
+        drop_last: bool,
+    ) -> DataLoader:
         return DataLoader(
-            dataset=self.data_val,
-            batch_size=self.test_batch_size_per_device,
+            dataset,
+            batch_size=self.hparams.batch_size,
+            shuffle=shuffle,
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
-            shuffle=False,
-            persistent_workers=True,
+            persistent_workers=self.hparams.persistent_workers and self.hparams.num_workers > 0,
+            drop_last=drop_last,
+            collate_fn=self._collate_fn,
         )
 
-    def test_dataloader(self):
-        return DataLoader(
-            dataset=self.data_test,
-            batch_size=self.test_batch_size_per_device,
-            num_workers=self.hparams.num_workers,
-            pin_memory=self.hparams.pin_memory,
-            shuffle=False,
-            persistent_workers=True,
-        )
+    def _collate_fn(self, batch: List[Dict[str, object]]):
+        images = torch.stack([item["image"] for item in batch], dim=0)
+        heatmaps = torch.stack([item["heatmaps"] for item in batch], dim=0)
+        landmarks = torch.stack([item["landmarks"] for item in batch], dim=0)
 
-    def teardown(self, stage: Optional[str] = None) -> None:
-        pass
+        meta = {
+            "image_id": [item["meta"]["image_id"] for item in batch],
+            "orig_size": [item["meta"]["orig_size"] for item in batch],
+            "crop_box": [item["meta"]["crop_box"] for item in batch],
+            "variant": [item["meta"]["variant"] for item in batch],
+            "img_size": torch.tensor(self._img_size, dtype=torch.float32),
+            "heatmap_size": torch.tensor(self._heatmap_size, dtype=torch.float32),
+            "landmarks": landmarks.clone(),
+        }
 
-    def state_dict(self) -> Dict[Any, Any]:
-        return {}
+        return images, heatmaps, meta
 
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        pass
+    @staticmethod
+    def _compute_split_lengths(total: int, splits: Sequence[float]) -> Tuple[int, int, int]:
+        if len(splits) != 3:
+            raise ValueError("train_val_test_split must contain three values (train, val, test).")
+        if sum(splits) <= 1.0 + 1e-6:
+            raw_lengths = [split * total for split in splits]
+            lengths = [int(length) for length in raw_lengths]
+            remainder = total - sum(lengths)
+            for idx in range(remainder):
+                lengths[idx % len(lengths)] += 1
+        else:
+            lengths = [int(s) for s in splits]
+            if sum(lengths) != total:
+                raise ValueError("Provided split lengths must sum to the dataset size.")
+        for idx, length in enumerate(lengths):
+            if length <= 0:
+                donor = max(range(len(lengths)), key=lambda j: lengths[j])
+                if lengths[donor] <= 1:
+                    raise ValueError("Unable to assign at least one sample per split.")
+                lengths[donor] -= 1
+                lengths[idx] += 1
+        train, val, test = lengths
+        return train, val, test
 
-@hydra.main(version_base="1.3", config_path="../../configs/data", config_name="data")
-def main(cfg: DictConfig) -> Optional[float]:
-    datamodule: LightningDataModule = hydra.utils.instantiate(config=cfg)
-    datamodule.setup()
-    val_loader = datamodule.val_dataloader()
-    for sample in val_loader:
-        img, heatmap = sample
-        img, heatmap = img[0], heatmap[0]
-        img = (img[0, :, :] * 255).numpy().astype(np.uint8)
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
-        for i in range(heatmap.shape[0]):
-            idx = np.unravel_index(np.argmax(heatmap[i]), heatmap[i].shape)
-            img = cv2.circle(img, (idx[1]*4, idx[0]*4), 2, (255, 255, 0), -1)
-
-        cv2.imwrite("test.png", img)
-        break
-
-if __name__ == "__main__":
-    main()
+__all__ = ["CervicalJSONDataModule"]

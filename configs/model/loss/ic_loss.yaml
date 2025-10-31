@@ -1,0 +1,7 @@
+_target_: src.loss.ic_loss.IntensityCategoricalLoss
+theta_bg: 0.4
+theta_fg: 0.9
+phi_bg: 0.5
+phi_fg: 0.5
+beta: 4.0
+phi2_cf: 0.05

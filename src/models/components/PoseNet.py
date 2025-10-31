@@ -1,170 +1,116 @@
+from __future__ import annotations
+
+from typing import Tuple
+
 import torch
 from torch import nn
 
 
-class conv2d(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: int,
-        stride: int,
-        padding: int,
-    ) -> None:
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, stride: int = 1) -> None:
         super().__init__()
-        self.conv2d = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding),
-            nn.ReLU(inplace=True),
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv2d(x)
-
-
-class deconv2d(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: int,
-        stride: int,
-    ) -> None:
-        super().__init__()
-        self.deconv2d = nn.Sequential(
-            nn.ConvTranspose2d(in_channels, out_channels, kernel_size, stride),
             nn.ReLU(inplace=True),
-            nn.BatchNorm2d(out_channels),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.deconv2d(x)
+        return self.block(x)
 
 
-class Head(nn.Module):
-    def __init__(
-        self,
-        kernel_size: int = 3,
-        padding: int = 1,
-        stride: int = 2,
-        num_channels=64,
-        in_channels=3,
-    ) -> None:
+class DownBlock(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int) -> None:
         super().__init__()
-        self.head = nn.Sequential(
-            conv2d(in_channels, num_channels, kernel_size, stride, padding),
-            conv2d(num_channels, num_channels, kernel_size, stride, padding),
-            conv2d(num_channels, num_channels, kernel_size, stride, padding),
-        )
-       
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.head(x)
+        self.conv1 = ConvBlock(in_channels, out_channels)
+        self.conv2 = ConvBlock(out_channels, out_channels)
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = self.conv1(x)
+        x = self.conv2(x)
+        skip = x
+        x = self.pool(x)
+        return x, skip
 
 
-class DownSampling(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        padding: int = 1,
-        stride: int = 1,
-        kernel_size: int = 3,
-    ) -> None:
+class UpBlock(nn.Module):
+    def __init__(self, in_channels: int, skip_channels: int, out_channels: int, use_deconv: bool = True) -> None:
         super().__init__()
-        self.downsampling = nn.Sequential(
-            conv2d(in_channels, out_channels, kernel_size, stride, padding),
-            conv2d(out_channels, out_channels, kernel_size, stride, padding),
-        )
-        self.conv_maxpool = nn.MaxPool2d(2)
-    
-    def forward(self, x: torch.Tensor, max_pool: bool) -> torch.Tensor:
-        x = self.downsampling(x)
-        if max_pool:
-            x = self.conv_maxpool(x)
+        if use_deconv:
+            self.up = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
+        else:
+            self.up = nn.Sequential(
+                nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+                nn.Conv2d(in_channels, out_channels, kernel_size=1),
+            )
+        self.conv1 = ConvBlock(out_channels + skip_channels, out_channels)
+        self.conv2 = ConvBlock(out_channels, out_channels)
+
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        x = self.up(x)
+        x = torch.cat([x, skip], dim=1)
+        x = self.conv1(x)
+        x = self.conv2(x)
         return x
 
 
-class Keep(nn.Module):
-    def __init__(
-        self,
-        in_channels: int=512,
-        out_channels: int=1024,
-        deconv_channels: int=512,
-        deconv_stride: int=2,
-        deconv_kernel_size: int=2,
-        kernel_size: int=3,
-        stride: int=1,
-        padding: int=1,
-    ) -> None:
-        super().__init__()
-        self.keep = nn.Sequential(
-            conv2d(in_channels, out_channels, kernel_size, stride, padding),
-            deconv2d(out_channels, deconv_channels, deconv_kernel_size, deconv_stride),
-        )
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.keep(x)
-
-
-class UpSampling(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: int = 3,
-        stride: int = 1,
-        padding: int = 1,
-        deconv_kernel_size: int = 2,
-        deconv_stride: int = 2,
-    ) -> None:
-        super().__init__()
-        self.upsampling = nn.Sequential(
-            conv2d(in_channels, out_channels, kernel_size, stride, padding),
-            conv2d(out_channels, out_channels, kernel_size, stride, padding),
-            deconv2d(out_channels, out_channels, deconv_kernel_size, deconv_stride),
-        )
-        
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.upsampling(x)
-    
-
 class PoseNet(nn.Module):
+    """PoseNet architecture tailored for cervical spine landmark detection."""
+
     def __init__(
         self,
+        in_channels: int = 3,
+        num_landmarks: int = 24,
+        use_deconv: bool = True,
     ) -> None:
         super().__init__()
 
-        self.head = Head()
-        self.down1 = DownSampling(64, 64)
-        self.down2 = DownSampling(64, 128)
-        self.down3 = DownSampling(128, 256)
-        self.down4 = DownSampling(256, 512)
-        self.keep = Keep()
-        self.up1 = UpSampling(1024, 512)
-        self.up2 = UpSampling(768, 256)
-        self.up3 = UpSampling(384, 128)
-        self.up4 = UpSampling(192, 64)
-        self.output_layer = nn.Conv2d(in_channels=64, out_channels=24, kernel_size=1)
+        self.head = nn.Sequential(
+            ConvBlock(in_channels, 64, stride=2),
+            ConvBlock(64, 64, stride=2),
+            ConvBlock(64, 64, stride=2),
+        )
 
+        self.down1 = DownBlock(64, 64)
+        self.down2 = DownBlock(64, 128)
+        self.down3 = DownBlock(128, 256)
+        self.down4 = DownBlock(256, 512)
+
+        self.bottleneck = ConvBlock(512, 1024)
+        self.up1 = UpBlock(1024, 512, 512, use_deconv=use_deconv)
+        self.up2 = UpBlock(512, 256, 256, use_deconv=use_deconv)
+        self.up3 = UpBlock(256, 128, 128, use_deconv=use_deconv)
+        self.up4 = UpBlock(128, 64, 64, use_deconv=use_deconv)
+
+        if use_deconv:
+            self.output_upsample = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
+        else:
+            self.output_upsample = nn.Sequential(
+                nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+                nn.Conv2d(64, 64, kernel_size=1),
+            )
+
+        self.output_layer = nn.Conv2d(64, num_landmarks, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.head(x) # [64,32,16]
-        x1 = self.down1(x, max_pool=True)   # [64,16,8]
-        x2 = self.down2(x1, max_pool=True)  # [128,8,4]
-        x3 = self.down3(x2, max_pool=True)  # [256,4,2]
-        x4 = self.down4(x3, max_pool=True)  # [512,2,1]
+        x = self.head(x)
 
-        x5 = self.keep(x4) # [512,4,2]
+        x, skip1 = self.down1(x)
+        x, skip2 = self.down2(x)
+        x, skip3 = self.down3(x)
+        x, skip4 = self.down4(x)
 
-        x5 = self.up1(torch.cat([x5, self.down4(x3, max_pool=False)], dim=1))   # [512,8,4]
-        x5 = self.up2(torch.cat([x5, self.down3(x2, max_pool=False)], dim=1))   # [256,16,8]
-        x5 = self.up3(torch.cat([x5, self.down2(x1, max_pool=False)], dim=1))   # [128,32,16]
-        x5 = self.up4(torch.cat([x5, self.down1(x, max_pool=False)], dim=1))    # [64,64,32]
-        x5 = self.output_layer(x5) # [24,64,32]
-        
-        return x5
+        x = self.bottleneck(x)
+
+        x = self.up1(x, skip4)
+        x = self.up2(x, skip3)
+        x = self.up3(x, skip2)
+        x = self.up4(x, skip1)
+
+        x = self.output_upsample(x)
+        x = self.output_layer(x)
+        return x
 
 
-if __name__ == "__main__":
-    pass
+__all__ = ["PoseNet"]

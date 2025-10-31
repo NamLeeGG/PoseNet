@@ -1,228 +1,136 @@
-from typing import Any, Dict, Tuple, Optional
+from __future__ import annotations
 
-import hydra
+from typing import Any, Dict, Optional, Tuple
+
 import torch
-import rootutils
-import numpy as np
-from omegaconf import DictConfig
+from hydra.utils import instantiate
 from lightning import LightningModule
-from src.loss.lossmodule import ICLoss
-from torchmetrics import MinMetric, MeanMetric, Metric
 
-rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
-
-### Failure Rate Metric ###
-class FailureRate(Metric):
-    """Failure Rate (FR) when NME exceeds threshold"""
-    def __init__(self, threshold=0.08):
-        super().__init__()
-        self.threshold = threshold
-        self.add_state("count_failures", default=torch.tensor(0, dtype=torch.float32), dist_reduce_fx="sum")
-        self.add_state("total", default=torch.tensor(0, dtype=torch.float32), dist_reduce_fx="sum")
-
-    def update(self, preds: torch.Tensor, target: torch.Tensor):
-        # Compute normalizing distance (with epsilon to avoid div by zero)
-        d = torch.norm(target[:, 0, :] - target[:, 4, :], dim=1) + 1e-6  # Ref: Eq.18, Page 59422
-
-        # Compute normalized error per landmark and average over all landmarks
-        error = torch.norm(preds - target, dim=2) / d.unsqueeze(1)
-        error = error.mean(dim=1)  # Mean across landmarks
-
-        self.count_failures += torch.sum(error > self.threshold)
-        self.total += preds.size(0)
-
-    def compute(self):
-        return self.count_failures / self.total
-
-
-### Cumulative Error Distribution (CED) and AUC Metric ###
-class CED_AUC(Metric):
-    """Computes the Area Under the Cumulative Error Distribution (CED) Curve"""
-    def __init__(self, max_threshold=0.1, num_bins=100):
-        super().__init__()
-        self.max_threshold = max_threshold
-        self.num_bins = num_bins
-        self.add_state("errors", default=torch.tensor([], dtype=torch.float32), dist_reduce_fx="cat")
-
-    def update(self, preds: torch.Tensor, target: torch.Tensor):
-        d = torch.norm(target[:, 0, :] - target[:, 4, :], dim=1) + 1e-6
-        error = torch.norm(preds - target, dim=2).mean(dim=1) / d
-        self.errors = torch.cat([self.errors, error], dim=0)
-
-    def compute(self):
-        thresholds = torch.linspace(0, self.max_threshold, self.num_bins)
-        ced_curve = (self.errors.unsqueeze(0) < thresholds.unsqueeze(1)).float().mean(dim=1)
-        return torch.trapz(ced_curve, thresholds)
-
-
-### Normalized Mean Error (NME) Metric ###
-class NME(Metric):
-    def __init__(self):
-        super().__init__()
-        self.add_state("sum_nme", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
-
-    def update(self, preds: torch.Tensor, target: torch.Tensor):
-        nme = torch.norm(preds - target, dim=2).mean(dim=1).sum()  # Ref: Eq.18, Page 59422
-        self.sum_nme += nme
-        self.total += preds.size(0)
-
-    def compute(self):
-        return self.sum_nme / self.total
-
-def get_keypoints_from_heatmaps(heatmaps: torch.Tensor) -> torch.Tensor:
-    """
-    Extract keypoints from heatmaps using argmax.
-    :param heatmaps: (B, N, H, W) tensor where N is number of landmarks.
-    :return: (B, N, 2) tensor with keypoint coordinates (x, y).
-    """
-    B, N, H, W = heatmaps.shape  
-    idxs = torch.argmax(heatmaps.reshape(B, N, -1), dim=2)  # Use PyTorch argmax
-    y, x = torch.div(idxs, W, rounding_mode='floor'), idxs % W  # Convert to (x, y)
-    keypoints_tensor = torch.stack((x, y), dim=2).float()  # Stack into (B, N, 2)
-    return keypoints_tensor
-
-def normalize_keypoints(keypoints: torch.Tensor) -> torch.Tensor:
-    """
-    Normalize keypoints using Min-Max scaling per sample.
-    :param keypoints: (B, N, 2) tensor of keypoints.
-    :return: Normalized keypoints.
-    """
-    x_min = keypoints[:, :, 0].min(dim=1, keepdim=True)[0]
-    x_max = keypoints[:, :, 0].max(dim=1, keepdim=True)[0]
-    y_min = keypoints[:, :, 1].min(dim=1, keepdim=True)[0]
-    y_max = keypoints[:, :, 1].max(dim=1, keepdim=True)[0]
-
-    keypoints[:, :, 0] = 2 * (keypoints[:, :, 0] - x_min) / (x_max - x_min + 1e-6) - 1
-    keypoints[:, :, 1] = 2 * (keypoints[:, :, 1] - y_min) / (y_max - y_min + 1e-6) - 1
-    return keypoints
 
 class PoseNetModule(LightningModule):
+    """LightningModule wrapping PoseNet with IC-Loss and evaluation metrics."""
+
     def __init__(
         self,
-        net: torch.nn.Module,
-        optimizer: torch.optim.Optimizer,
-        scheduler: torch.optim.lr_scheduler,
-        compile: bool,
+        model: Dict,
+        loss: Optional[Dict],
+        optimizer: Dict,
+        scheduler: Optional[Dict] = None,
+        loss_type: str = "ic_loss",
     ) -> None:
         super().__init__()
 
-        # this line allows to access init params with 'self.hparams' attribute
-        # also ensures init params will be stored in ckpt
         self.save_hyperparameters(logger=False)
 
-        self.net = net
+        self.model = instantiate(model)
+        self.loss_type = loss_type
+        if loss_type == "ic_loss":
+            if loss is None:
+                raise ValueError("IC-Loss requested but no loss configuration provided.")
+            self.criterion = instantiate(loss)
+        elif loss_type == "mse":
+            self.criterion = torch.nn.MSELoss()
+        else:
+            raise ValueError(f"Unsupported loss_type '{loss_type}'.")
 
-        # loss function
-        # self.criterion = torch.nn.MSELoss()
-        self.criterion = ICLoss()
-
-
-        # metric objects for calculating and averaging accuracy across batches
-        self.train_acc = NME()
-        self.val_acc = NME()
-        self.test_acc = NME()
-        self.test_fr = FailureRate(threshold=0.08)
-        self.test_auc = CED_AUC(max_threshold=0.1, num_bins=100)
-
-        # for averaging loss across batches
-        self.train_loss = MeanMetric()
-        self.val_loss = MeanMetric()
-        self.test_loss = MeanMetric()
-
-        # for tracking best so far validation accuracy
-        self.val_acc_best = MinMetric()
+        self.optimizer_cfg = optimizer
+        self.scheduler_cfg = scheduler
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        return self.model(x)
 
-    def on_train_start(self) -> None:
-        self.val_loss.reset()
-        self.val_acc.reset()
-        self.val_acc_best.reset()
+    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]], batch_idx: int) -> torch.Tensor:
+        images, target_heatmaps, meta = batch
+        predictions = self.model(images)
+        loss = self.criterion(predictions, target_heatmaps)
 
-    def model_step(
-        self, batch: Tuple[torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        x, y = batch
-        logits = self.forward(x)
-        loss = self.criterion(logits, y)
+        pred_landmarks = self.decode_heatmaps(predictions, meta)
+        gt_landmarks = meta["landmarks"].to(pred_landmarks.device)
+        nme, fr_008, fr_010 = self.compute_metrics(pred_landmarks, gt_landmarks)
 
-        preds = normalize_keypoints(get_keypoints_from_heatmaps(logits))
-        y = normalize_keypoints(get_keypoints_from_heatmaps(y))
-
-        return loss, preds, y
-
-    def training_step(
-        self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        loss, preds, targets = self.model_step(batch)
-
-        # update and log metrics
-        self.train_loss(loss)
-        self.train_acc(preds, targets)
-        self.log("train/loss", self.train_loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("train/acc", self.train_acc, on_step=False, on_epoch=True, prog_bar=True)
-
-        # return loss or backpropagation will fail
+        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train/nme", nme, on_epoch=True, prog_bar=True)
+        self.log("train/fr_008", fr_008, on_epoch=True)
+        self.log("train/fr_010", fr_010, on_epoch=True)
         return loss
 
-    def on_train_epoch_end(self) -> None:
-        pass
+    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]], batch_idx: int) -> None:
+        images, target_heatmaps, meta = batch
+        predictions = self.model(images)
+        loss = self.criterion(predictions, target_heatmaps)
 
-    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> None:
-        loss, preds, targets = self.model_step(batch)
+        pred_landmarks = self.decode_heatmaps(predictions, meta)
+        gt_landmarks = meta["landmarks"].to(pred_landmarks.device)
+        nme, fr_008, fr_010 = self.compute_metrics(pred_landmarks, gt_landmarks)
 
-        # update and log metrics
-        self.val_loss(loss)
-        self.val_acc(preds, targets)
-        self.log("val/loss", self.val_loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("val/acc", self.val_acc, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val/loss", loss, on_epoch=True, prog_bar=True)
+        self.log("val/nme", nme, on_epoch=True, prog_bar=True)
+        self.log("val/fr_008", fr_008, on_epoch=True)
+        self.log("val/fr_010", fr_010, on_epoch=True)
 
-    def on_validation_epoch_end(self) -> None:
-        acc = self.val_acc.compute()
-        self.val_acc_best(acc)
-        self.log("val/acc_best", self.val_acc_best.compute(), sync_dist=True, prog_bar=True)
+    def test_step(self, batch: Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]], batch_idx: int) -> None:
+        images, target_heatmaps, meta = batch
+        predictions = self.model(images)
+        loss = self.criterion(predictions, target_heatmaps)
 
-    def test_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> None:
-        loss, preds, targets = self.model_step(batch)
+        pred_landmarks = self.decode_heatmaps(predictions, meta)
+        gt_landmarks = meta["landmarks"].to(pred_landmarks.device)
+        nme, fr_008, fr_010 = self.compute_metrics(pred_landmarks, gt_landmarks)
 
-        self.test_loss(loss)
-        self.test_acc(preds, targets)
-        self.test_fr(preds, targets)
-        self.test_auc(preds, targets)
+        self.log("test/loss", loss, on_epoch=True, prog_bar=True)
+        self.log("test/nme", nme, on_epoch=True, prog_bar=True)
+        self.log("test/fr_008", fr_008, on_epoch=True)
+        self.log("test/fr_010", fr_010, on_epoch=True)
 
-        self.log("test/loss", self.test_loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("test/nme", self.test_acc, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("test/failure_rate", self.test_fr, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("test/auc", self.test_auc, on_step=False, on_epoch=True, prog_bar=True)
+    def configure_optimizers(self):
+        optimizer = instantiate(self.optimizer_cfg, params=self.parameters())
+        if self.scheduler_cfg:
+            scheduler = instantiate(self.scheduler_cfg, optimizer=optimizer)
+            return {"optimizer": optimizer, "lr_scheduler": scheduler}
+        return optimizer
 
-    def on_test_epoch_end(self) -> None:
-        self.log("test/nme_final", self.test_acc.compute(), sync_dist=True, prog_bar=True)
-        self.log("test/failure_rate_final", self.test_fr.compute(), sync_dist=True, prog_bar=True)
-        self.log("test/auc_final", self.test_auc.compute(), sync_dist=True, prog_bar=True)
+    def decode_heatmaps(self, heatmaps: torch.Tensor, meta: Dict[str, Any]) -> torch.Tensor:
+        batch_size, num_landmarks, hm_h, hm_w = heatmaps.shape
+        flattened = heatmaps.view(batch_size, num_landmarks, -1)
+        indices = flattened.argmax(dim=-1)
+        ys = torch.div(indices, hm_w, rounding_mode="floor")
+        xs = indices % hm_w
 
-    def setup(self, stage: str) -> None:
-        if self.hparams.compile and stage == "fit":
-            self.net = torch.compile(self.net)
+        img_size = meta.get("img_size")
+        if isinstance(img_size, torch.Tensor):
+            img_size = img_size.to(device=heatmaps.device, dtype=torch.float32)
+            img_h, img_w = img_size[0], img_size[1]
+        elif isinstance(img_size, (list, tuple)) and len(img_size) == 2:
+            img_h = torch.tensor(float(img_size[0]), device=heatmaps.device)
+            img_w = torch.tensor(float(img_size[1]), device=heatmaps.device)
+        else:
+            img_h = torch.tensor(float(hm_h * 4), device=heatmaps.device)
+            img_w = torch.tensor(float(hm_w * 4), device=heatmaps.device)
 
-    def configure_optimizers(self) -> Dict[str, Any]:
-        optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
-        if self.hparams.scheduler is not None:
-            scheduler = self.hparams.scheduler(optimizer=optimizer)
-            return {
-                "optimizer": optimizer,
-                "lr_scheduler": {
-                    "scheduler": scheduler,
-                    "monitor": "val/acc_best",
-                    "interval": "epoch",
-                    "frequency": 1,
-                },
-            }
-        return {"optimizer": optimizer}
+        scale_x = img_w / float(hm_w)
+        scale_y = img_h / float(hm_h)
+        coords_x = xs.float() * scale_x
+        coords_y = ys.float() * scale_y
+        return torch.stack([coords_x, coords_y], dim=-1)
+
+    def compute_metrics(self, preds: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        errors = torch.norm(preds - target, dim=-1)
+        ref = self.reference_distance(target)
+        per_sample = errors.mean(dim=-1) / ref
+        nme = per_sample.mean()
+        fr_008 = (per_sample > 0.08).float().mean()
+        fr_010 = (per_sample > 0.10).float().mean()
+        return nme, fr_008, fr_010
+
+    @staticmethod
+    def reference_distance(landmarks: torch.Tensor) -> torch.Tensor:
+        if landmarks.size(1) >= 5:
+            ref = torch.norm(landmarks[:, 0] - landmarks[:, 4], dim=-1)
+            fallback = torch.norm(landmarks[:, 0] - landmarks[:, -1], dim=-1)
+            ref = torch.where(ref > 1e-6, ref, fallback)
+        else:
+            ref = torch.norm(landmarks[:, 0] - landmarks[:, -1], dim=-1)
+        return ref.clamp_min(1e-6)
 
 
-@hydra.main(version_base="1.3", config_path="../../configs/model", config_name="model.yaml")
-def main(cfg: DictConfig) -> Optional[float]:
-    model: LightningModule = hydra.utils.instantiate(cfg)
-
-if __name__ == "__main__":
-    main()
+__all__ = ["PoseNetModule"]

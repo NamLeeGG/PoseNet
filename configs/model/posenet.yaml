@@ -1,0 +1,14 @@
+_target_: src.models.posenet_module.PoseNetModule
+model:
+  _target_: src.models.components.PoseNet.PoseNet
+  in_channels: 3
+  num_landmarks: ${data.num_landmarks}
+  use_deconv: true
+loss: null
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 0.01
+  betas: [0.9, 0.999]
+  weight_decay: 1e-5
+scheduler: null
+loss_type: ic_loss
