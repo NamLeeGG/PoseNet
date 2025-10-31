@@ -11,6 +11,15 @@ from src.data.components.dataset import *
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
+def train_collate_fn(batch):
+    """Collate function for training that doubles the batch size (handles augmentation pairs)"""
+    images = torch.empty([0, 3, 256, 128])
+    labels = torch.empty([0, 23, 64, 32])
+    for (x1, y1), (x2, y2) in batch:
+        images = torch.cat((images, x1[None,:], x2[None,:]), dim=0)
+        labels = torch.cat((labels, y1[None,:], y2[None,:]), dim=0)
+    return images, labels
+
 class DataModule(LightningDataModule):
     def __init__(
         self,
@@ -21,6 +30,7 @@ class DataModule(LightningDataModule):
         train_transforms: Optional[A.Compose] = None,
         test_transforms: Optional[A.Compose] = None,
         pin_memory: bool = False,
+        persistent_workers: bool = False,
     ) -> None:
         super().__init__()
 
@@ -65,21 +75,14 @@ class DataModule(LightningDataModule):
             self.data_test = CervicalDataset(dataset=testset, mode='test', transform=self.test_transforms)
 
     def train_dataloader(self):
-        def collate_fn(batch):
-            images = torch.empty([0, 3, 256, 128])
-            labels = torch.empty([0, 23, 64, 32])
-            for (x1, y1), (x2, y2) in batch:
-                images = torch.cat((images, x1[None,:], x2[None,:]), dim=0)
-                labels = torch.cat((labels, y1[None,:], y2[None,:]), dim=0)
-            return images, labels
-    
         return DataLoader(
             dataset=self.data_train,
             batch_size=self.train_batch_size_per_device,
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
+            persistent_workers=self.hparams.persistent_workers if self.hparams.num_workers > 0 else False,
             shuffle=True,
-            collate_fn=collate_fn,
+            collate_fn=train_collate_fn,
         )
 
     def val_dataloader(self):
@@ -88,6 +91,7 @@ class DataModule(LightningDataModule):
             batch_size=self.test_batch_size_per_device,
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
+            persistent_workers=self.hparams.persistent_workers if self.hparams.num_workers > 0 else False,
             shuffle=False,
         )
 
@@ -97,6 +101,7 @@ class DataModule(LightningDataModule):
             batch_size=self.test_batch_size_per_device,
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
+            persistent_workers=self.hparams.persistent_workers if self.hparams.num_workers > 0 else False,
             shuffle=False,
         )
 

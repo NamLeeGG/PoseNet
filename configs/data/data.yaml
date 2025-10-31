@@ -1,8 +1,10 @@
 _target_: src.data.datamodule.DataModule
 train_test_split: [0.9, 0.1]
-train_batch_size: 32
-test_batch_size: 64
-num_workers: 4
+train_batch_size: 16  # Reduced for 12GB GPU - training collate doubles this (16 -> 32 images)
+test_batch_size: 32  # Reduced for 12GB GPU
+num_workers: 4  # Reduced to save memory
+pin_memory: true  # Enable pin_memory for faster GPU transfers
+persistent_workers: true  # Keep workers alive between epochs for faster data loading
 
 train_transforms:
   _target_: albumentations.Compose

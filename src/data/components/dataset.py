@@ -25,21 +25,71 @@ def generate_heatmaps(image_size, keypoints, sigma=1.5):
 class BaseDataset(Dataset):
     def __init__(self):
         self.img_files = self._parse_data()
+        self.annotations = self._load_annotations()
         
     def __len__(self):
         return len(self.img_files)
     
     def __getitem__(self, index):
         img_file = self.img_files[index]
-        label_file = img_file.replace("images", "annotations").replace(".png", ".json")
-
-        return img_file, label_file
+        img_name = os.path.basename(img_file)
+        img_id = os.path.splitext(img_name)[0]
+        
+        # Get annotation data from consolidated JSON file
+        annotation_data = self.annotations.get(img_id, None)
+        
+        return img_file, annotation_data
     
     def _parse_data(self):
-        img_folder = "./data/images"
-        img_files = sorted(os.listdir(img_folder))
+        # Use os.path.join for proper cross-platform path handling
+        img_folder = os.path.join("data", "images")
+        if not os.path.exists(img_folder):
+            # Try alternative path if data folder is in different location
+            img_folder = os.path.join(".", "data", "images")
+        img_files = sorted([f for f in os.listdir(img_folder) if f.endswith(('.png', '.jpg', '.jpeg'))])
         img_files = [os.path.join(img_folder, img_file) for img_file in img_files]
         return img_files
+    
+    def _load_annotations(self):
+        """Load annotations from consolidated JSON file and create mapping"""
+        annotation_file = os.path.join("data", "default.json")
+        if not os.path.exists(annotation_file):
+            annotation_file = os.path.join(".", "data", "default.json")
+        
+        annotations_dict = {}
+        
+        if os.path.exists(annotation_file):
+            with open(annotation_file, "r", encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Get label mapping from categories
+            categories = data.get('categories', {})
+            label_mapping = {}
+            if 'label' in categories and 'labels' in categories['label']:
+                for idx, label_info in enumerate(categories['label']['labels']):
+                    label_mapping[idx] = label_info['name']
+            
+            # Create mapping from image ID to annotation data in 'shapes' format
+            items = data.get('items', [])
+            for item in items:
+                item_id = item.get('id', '')
+                item_annotations = item.get('annotations', [])
+                
+                # Convert annotations to 'shapes' format expected by CervicalDataset
+                shapes = []
+                for ann in item_annotations:
+                    label_id = ann.get('label_id')
+                    points = ann.get('points', [])
+                    label_name = label_mapping.get(label_id, f'label_{label_id}')
+                    
+                    shapes.append({
+                        'label': label_name,
+                        'points': [points]  # Wrap in list to match expected format
+                    })
+                
+                annotations_dict[item_id] = {'shapes': shapes}
+        
+        return annotations_dict
 
 
 class CervicalDataset(Dataset):
@@ -52,15 +102,19 @@ class CervicalDataset(Dataset):
         return self.dataset.__len__()
     
     def __getitem__(self, index):
-        img_file, label_file = self.dataset.__getitem__(index)
+        img_file, annotation_data = self.dataset.__getitem__(index)
 
         """get raw image"""
         img = cv2.imread(img_file)
+        
+        if img is None:
+            raise ValueError(f"Failed to load image: {img_file}")
 
         """get raw label"""
-        with open(label_file, "r", encoding='utf-8') as f:
-            label = json.load(f)
-        label = label['shapes']
+        if annotation_data is None:
+            raise ValueError(f"No annotation data found for image: {img_file}")
+        
+        label = annotation_data['shapes']
         points = {}
         for point in label:
             points[point['label']] = point['points']

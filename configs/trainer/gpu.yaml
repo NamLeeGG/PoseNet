@@ -3,3 +3,15 @@ defaults:
 
 accelerator: gpu
 devices: 1
+
+# Enable gradient accumulation for effective larger batch size
+# accumulate_grad_batches: 2
+
+# Enable automatic mixed precision for faster training
+precision: 16-mixed
+
+# Enable persistent workers for faster data loading
+# This will be handled in datamodule if needed
+
+# Use deterministic training (set to False for better performance)
+deterministic: False

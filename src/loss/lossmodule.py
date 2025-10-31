@@ -81,8 +81,6 @@ def Loss_CF(pred, target, beta=4, phi_1_CF=0.5, phi_2_CF=0.05, theta_BG=0.4, the
     intensity_map = intensity_map_function(target, theta_FG, 1)
     loss = LCF(pred, target, beta, phi_1_CF, phi_2_CF) * omega_CF.unsqueeze(-1).unsqueeze(-1) * intensity_map
     
-    print(pred.shape, target.shape, omega_CF.shape, intensity_map.shape)
-
     return loss.mean()
 
 ### CATEGORICAL LOSS FUNC ###

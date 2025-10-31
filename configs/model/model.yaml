@@ -20,4 +20,4 @@ net:
   _target_: src.models.components.PoseNet.PoseNet
 
 # compile model for faster training with pytorch 2.0
-compile: false
+compile: false  # Disabled on Windows (requires Triton which doesn't work on Windows)

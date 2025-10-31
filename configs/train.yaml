@@ -8,7 +8,7 @@ defaults:
   - model: model
   - callbacks: default
   - logger: wandb # changed from null to wandb for logging, change to tensorboard or null if needed
-  - trainer: default
+  - trainer: gpu
   - paths: default
   - extras: default
   - hydra: default
