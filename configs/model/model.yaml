@@ -16,8 +16,14 @@ scheduler:
   factor: 0.1
   patience: 10
 
+num_landmarks: 23
+heatmap_downsample: ${data.heatmap_downsample}
+theta_bg: ${data.theta_bg}
+theta_fg: ${data.theta_fg}
+use_ic_loss: true
+
 net:
   _target_: src.models.components.PoseNet.PoseNet
+  num_landmarks: ${model.num_landmarks}
 
-# compile model for faster training with pytorch 2.0
-compile: false  # Disabled on Windows (requires Triton which doesn't work on Windows)
+compile: false

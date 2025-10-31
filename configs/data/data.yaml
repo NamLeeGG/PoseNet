@@ -1,52 +1,19 @@
-_target_: src.data.datamodule.DataModule
+_target_: src.data.datamodule.CervicalSpineDataModule
+data_dir: ${paths.data_dir}
+annotation_file: default.json
+img_ext: .png
 train_test_split: [0.9, 0.1]
-train_batch_size: 16  # Reduced for 12GB GPU - training collate doubles this (16 -> 32 images)
-test_batch_size: 32  # Reduced for 12GB GPU
-num_workers: 4  # Reduced to save memory
-pin_memory: true  # Enable pin_memory for faster GPU transfers
-persistent_workers: true  # Keep workers alive between epochs for faster data loading
-
-train_transforms:
-  _target_: albumentations.Compose
-  keypoint_params:
-    _target_: albumentations.KeypointParams
-    format: "xy"
-    remove_invisible: false
-  transforms:
-  - _target_: albumentations.Resize
-    height: 256
-    width: 128
-  - _target_: albumentations.ShiftScaleRotate
-    shift_limit: 0.05
-    scale_limit: 0.05
-    rotate_limit: 0.05 
-    p: 0.5
-  - _target_: albumentations.Rotate
-    limit: 45
-    p: 0.5
-  - _target_: albumentations.Blur
-    p: 0.5
-  - _target_: albumentations.Posterize
-    p: 0.5
-  - _target_: albumentations.RandomShadow
-    p: 0.5
-  - _target_: albumentations.RGBShift
-    r_shift_limit: 15
-    g_shift_limit: 15
-    b_shift_limit: 15
-    p: 0.5
-  - _target_: albumentations.RandomBrightnessContrast
-    p: 0.5
-  - _target_: albumentations.ToTensorV2
-
-test_transforms:
-  _target_: albumentations.Compose
-  keypoint_params:
-    _target_: albumentations.KeypointParams
-    format: "xy"
-    remove_invisible: false
-  transforms:
-  - _target_: albumentations.Resize
-    height: 256
-    width: 128
-  - _target_: albumentations.ToTensorV2
+train_batch_size: 60
+test_batch_size: 60
+num_workers: 4
+pin_memory: true
+persistent_workers: true
+heatmap_downsample: 4
+image_height: 256
+image_width: 128
+sigma: 1.5
+theta_bg: 0.4
+theta_fg: 0.9
+use_flipped: true
+random_eval_variant: false
+seed: 42
