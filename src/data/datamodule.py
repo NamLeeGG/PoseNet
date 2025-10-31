@@ -1,80 +1,154 @@
-from typing import Any, Dict, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
-import hydra
-import rootutils
-import albumentations as A
-from omegaconf import DictConfig
 from lightning import LightningDataModule
-from torch.utils.data import DataLoader, Dataset, random_split
-from src.data.components.dataset import *
+from torch.utils.data import DataLoader
 
-rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
+from src.data.components.dataset import CervicalSpineDataset, ImageSample, load_image_samples
 
-def train_collate_fn(batch):
-    """Collate function for training that doubles the batch size (handles augmentation pairs)"""
-    images = torch.empty([0, 3, 256, 128])
-    labels = torch.empty([0, 23, 64, 32])
-    for (x1, y1), (x2, y2) in batch:
-        images = torch.cat((images, x1[None,:], x2[None,:]), dim=0)
-        labels = torch.cat((labels, y1[None,:], y2[None,:]), dim=0)
-    return images, labels
 
-class DataModule(LightningDataModule):
+class CervicalSpineDataModule(LightningDataModule):
     def __init__(
         self,
-        train_test_split: Tuple[float, float] = (0.9, 0.1),
-        train_batch_size: int = 32,
-        test_batch_size: int = 64,
+        data_dir: str,
+        annotation_file: str = "default.json",
+        img_ext: str = ".png",
+        train_test_split: Sequence[float] = (0.9, 0.1),
+        train_batch_size: int = 60,
+        test_batch_size: int = 60,
         num_workers: int = 4,
-        train_transforms: Optional[A.Compose] = None,
-        test_transforms: Optional[A.Compose] = None,
         pin_memory: bool = False,
         persistent_workers: bool = False,
+        heatmap_downsample: int = 4,
+        image_height: int = 256,
+        image_width: int = 128,
+        sigma: float = 1.5,
+        theta_bg: float = 0.4,
+        theta_fg: float = 0.9,
+        use_flipped: bool = True,
+        random_eval_variant: bool = False,
+        seed: int = 42,
     ) -> None:
         super().__init__()
 
-        # this line allows to access init params with 'self.hparams' attribute
-        # also ensures init params will be stored in ckpt
         self.save_hyperparameters(logger=False)
 
-        # data transformations
-        self.train_transforms = train_transforms
-        self.test_transforms = test_transforms
-
-        self.data_train: Optional[Dataset] = None
-        self.data_val: Optional[Dataset] = None
-        self.data_test: Optional[Dataset] = None
-
+        self.data_dir = Path(data_dir)
+        self.annotation_file = annotation_file
+        self.img_ext = img_ext
+        self.train_split = float(train_test_split[0]) if len(train_test_split) > 0 else 0.9
         self.train_batch_size_per_device = train_batch_size
         self.test_batch_size_per_device = test_batch_size
+        self.seed = seed
+
+        self.samples: Optional[List[ImageSample]] = None
+        self.train_indices: Optional[List[int]] = None
+        self.val_indices: Optional[List[int]] = None
+
+        self.data_train: Optional[CervicalSpineDataset] = None
+        self.data_val: Optional[CervicalSpineDataset] = None
+        self.data_test: Optional[CervicalSpineDataset] = None
+
+        self.num_landmarks: Optional[int] = None
+
+    @property
+    def image_size(self) -> Tuple[int, int]:
+        return (self.hparams.image_height, self.hparams.image_width)
 
     @property
     def num_classes(self) -> int:
-        return 23
+        return int(self.num_landmarks) if self.num_landmarks is not None else 0
 
     def prepare_data(self) -> None:
-        pass
+        load_image_samples(self.data_dir, self.annotation_file, self.img_ext)
+
+    def _split_indices(self) -> None:
+        if self.samples is None:
+            self.samples = load_image_samples(self.data_dir, self.annotation_file, self.img_ext)
+        num_samples = len(self.samples)
+        train_count = int(round(num_samples * self.train_split))
+        train_count = max(1, min(train_count, num_samples - 1)) if num_samples > 1 else num_samples
+        val_count = num_samples - train_count
+
+        generator = torch.Generator().manual_seed(self.seed)
+        permutation = torch.randperm(num_samples, generator=generator).tolist()
+        self.train_indices = permutation[:train_count]
+        self.val_indices = permutation[train_count:] if val_count > 0 else permutation[:]
 
     def setup(self, stage: Optional[str] = None) -> None:
-        # Divide batch size by the number of devices.
+        if self.samples is None or self.train_indices is None or self.val_indices is None:
+            self._split_indices()
+
+        if stage in (None, "fit"):
+            self.data_train = CervicalSpineDataset(
+                samples=self.samples,
+                indices=self.train_indices,
+                split="train",
+                image_size=self.image_size,
+                heatmap_downsample=self.hparams.heatmap_downsample,
+                sigma=self.hparams.sigma,
+                theta_bg=self.hparams.theta_bg,
+                theta_fg=self.hparams.theta_fg,
+                use_flipped=self.hparams.use_flipped,
+                random_eval_variant=False,
+                seed=self.seed,
+            )
+            self.data_val = CervicalSpineDataset(
+                samples=self.samples,
+                indices=self.val_indices,
+                split="val",
+                image_size=self.image_size,
+                heatmap_downsample=self.hparams.heatmap_downsample,
+                sigma=self.hparams.sigma,
+                theta_bg=self.hparams.theta_bg,
+                theta_fg=self.hparams.theta_fg,
+                use_flipped=self.hparams.use_flipped,
+                random_eval_variant=self.hparams.random_eval_variant,
+                seed=self.seed,
+            )
+
+        if stage in (None, "test"):
+            if self.data_val is None:
+                self.data_val = CervicalSpineDataset(
+                    samples=self.samples,
+                    indices=self.val_indices,
+                    split="val",
+                    image_size=self.image_size,
+                    heatmap_downsample=self.hparams.heatmap_downsample,
+                    sigma=self.hparams.sigma,
+                    theta_bg=self.hparams.theta_bg,
+                    theta_fg=self.hparams.theta_fg,
+                    use_flipped=self.hparams.use_flipped,
+                    random_eval_variant=self.hparams.random_eval_variant,
+                    seed=self.seed,
+                )
+            self.data_test = CervicalSpineDataset(
+                samples=self.samples,
+                indices=self.val_indices,
+                split="test",
+                image_size=self.image_size,
+                heatmap_downsample=self.hparams.heatmap_downsample,
+                sigma=self.hparams.sigma,
+                theta_bg=self.hparams.theta_bg,
+                theta_fg=self.hparams.theta_fg,
+                use_flipped=self.hparams.use_flipped,
+                random_eval_variant=self.hparams.random_eval_variant,
+                seed=self.seed,
+            )
+
+        if self.num_landmarks is None and self.data_train is not None:
+            self.num_landmarks = self.data_train.num_landmarks
+
         if self.trainer is not None:
             if self.hparams.train_batch_size % self.trainer.world_size != 0:
                 raise RuntimeError(
-                    f"Batch size ({self.hparams.train_batch_size}) is not divisible by the number of devices ({self.trainer.world_size})."
+                    f"Batch size ({self.hparams.train_batch_size}) must be divisible by the number of devices ({self.trainer.world_size})."
                 )
             self.train_batch_size_per_device = self.hparams.train_batch_size // self.trainer.world_size
             self.test_batch_size_per_device = self.hparams.test_batch_size // self.trainer.world_size
 
-        # load and split datasets only if not loaded already
-        if not self.data_train and not self.data_val and not self.data_test:
-            dataset = BaseDataset()
-            trainset, testset = random_split(dataset, self.hparams.train_test_split, generator=torch.Generator().manual_seed(42))
-            self.data_train = CervicalDataset(dataset=trainset, mode='train', transform=self.train_transforms)
-            self.data_val = CervicalDataset(dataset=testset, mode='val', transform=self.test_transforms)
-            self.data_test = CervicalDataset(dataset=testset, mode='test', transform=self.test_transforms)
-
-    def train_dataloader(self):
+    def train_dataloader(self) -> DataLoader:
         return DataLoader(
             dataset=self.data_train,
             batch_size=self.train_batch_size_per_device,
@@ -82,10 +156,9 @@ class DataModule(LightningDataModule):
             pin_memory=self.hparams.pin_memory,
             persistent_workers=self.hparams.persistent_workers if self.hparams.num_workers > 0 else False,
             shuffle=True,
-            collate_fn=train_collate_fn,
         )
 
-    def val_dataloader(self):
+    def val_dataloader(self) -> DataLoader:
         return DataLoader(
             dataset=self.data_val,
             batch_size=self.test_batch_size_per_device,
@@ -95,7 +168,7 @@ class DataModule(LightningDataModule):
             shuffle=False,
         )
 
-    def test_dataloader(self):
+    def test_dataloader(self) -> DataLoader:
         return DataLoader(
             dataset=self.data_test,
             batch_size=self.test_batch_size_per_device,
@@ -114,23 +187,5 @@ class DataModule(LightningDataModule):
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         pass
 
-@hydra.main(version_base="1.3", config_path="../../configs/data", config_name="data")
-def main(cfg: DictConfig) -> Optional[float]:
-    datamodule: LightningDataModule = hydra.utils.instantiate(config=cfg)
-    datamodule.setup()
-    val_loader = datamodule.val_dataloader()
-    for sample in val_loader:
-        img, heatmap = sample
-        img, heatmap = img[0], heatmap[0]
-        img = (img[0,:,:] * 255).numpy().astype(np.uint8)
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
-        for i in range(heatmap.shape[0]):
-            idx = np.unravel_index(np.argmax(heatmap[i]), heatmap[i].shape)
-            img = cv2.circle(img, (idx[1]*4, idx[0]*4), 2, (255, 255, 0), -1)
-        
-        cv2.imwrite("test.png", img)
-        break
-
-if __name__ == "__main__":
-    main()
+__all__ = ["CervicalSpineDataModule"]
