@@ -312,13 +312,21 @@ class CervicalSpineDataset(Dataset):
         variant: int,
         image_path: Path,
     ) -> Dict[str, torch.Tensor]:
-        image_tensor = torch.from_numpy(image.transpose(2, 0, 1).astype(np.float32))
-        heatmap_tensor = torch.from_numpy(heatmaps.astype(np.float32))
-        attention_tensor = torch.from_numpy(attention.astype(np.float32))
-        landmark_tensor = torch.from_numpy(landmarks.astype(np.float32))
-        landmark_original_tensor = torch.from_numpy(landmarks_original.astype(np.float32))
-        crop_tensor = torch.from_numpy(crop_box.astype(np.float32))
-        scale_tensor = torch.from_numpy(scale.astype(np.float32))
+        image_array = image.transpose(2, 0, 1).astype(np.float32, copy=False)
+        heatmap_array = heatmaps.astype(np.float32, copy=False)
+        attention_array = attention.astype(np.float32, copy=False)
+        landmark_array = landmarks.astype(np.float32, copy=False)
+        landmark_original_array = landmarks_original.astype(np.float32, copy=False)
+        crop_array = crop_box.astype(np.float32, copy=False)
+        scale_array = scale.astype(np.float32, copy=False)
+
+        image_tensor = torch.tensor(image_array, dtype=torch.float32)
+        heatmap_tensor = torch.tensor(heatmap_array, dtype=torch.float32)
+        attention_tensor = torch.tensor(attention_array, dtype=torch.float32)
+        landmark_tensor = torch.tensor(landmark_array, dtype=torch.float32)
+        landmark_original_tensor = torch.tensor(landmark_original_array, dtype=torch.float32)
+        crop_tensor = torch.tensor(crop_array, dtype=torch.float32)
+        scale_tensor = torch.tensor(scale_array, dtype=torch.float32)
 
         return {
             "image": image_tensor,
