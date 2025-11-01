@@ -14,6 +14,6 @@ image_width: 128
 sigma: 1.5
 theta_bg: 0.4
 theta_fg: 0.9
-use_flipped: true
+use_flipped: false  # Temporarily disabled due to augmentation bug
 random_eval_variant: false
 seed: 42

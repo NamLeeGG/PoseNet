@@ -148,6 +148,7 @@ dmypy.json
 configs/local/default.yaml
 /data/
 /logs/
+/inference/
 .env
 
 # Aim logging

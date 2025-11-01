@@ -166,7 +166,11 @@ def load_image_samples(data_dir: Path, annotation_file: str, img_ext: str) -> Li
 def _build_augmentation_pipeline() -> A.Compose:
     return A.Compose(
         [
-            A.Rotate(limit=45, border_mode=cv2.BORDER_REFLECT_101, p=0.75),
+            A.Affine(
+                rotate=(-45, 45),
+                fit_output=False,
+                p=0.75,
+            ),
             A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.02, p=0.5),
             A.RandomBrightnessContrast(p=0.5),
         ],
@@ -312,6 +316,13 @@ class CervicalSpineDataset(Dataset):
         variant: int,
         image_path: Path,
     ) -> Dict[str, torch.Tensor]:
+        # image_tensor = torch.tensor(image.transpose(2, 0, 1), dtype=torch.float32)
+        # heatmap_tensor = torch.tensor(heatmaps, dtype=torch.float32)
+        # attention_tensor = torch.tensor(attention, dtype=torch.float32)
+        # landmark_tensor = torch.tensor(landmarks, dtype=torch.float32)
+        # landmark_original_tensor = torch.tensor(landmarks_original, dtype=torch.float32)
+        # crop_tensor = torch.tensor(crop_box, dtype=torch.float32)
+        # scale_tensor = torch.tensor(scale, dtype=torch.float32)
         image_array = image.transpose(2, 0, 1).astype(np.float32, copy=False)
         heatmap_array = heatmaps.astype(np.float32, copy=False)
         attention_array = attention.astype(np.float32, copy=False)
@@ -320,13 +331,13 @@ class CervicalSpineDataset(Dataset):
         crop_array = crop_box.astype(np.float32, copy=False)
         scale_array = scale.astype(np.float32, copy=False)
 
-        image_tensor = torch.tensor(image_array, dtype=torch.float32)
-        heatmap_tensor = torch.tensor(heatmap_array, dtype=torch.float32)
-        attention_tensor = torch.tensor(attention_array, dtype=torch.float32)
-        landmark_tensor = torch.tensor(landmark_array, dtype=torch.float32)
-        landmark_original_tensor = torch.tensor(landmark_original_array, dtype=torch.float32)
-        crop_tensor = torch.tensor(crop_array, dtype=torch.float32)
-        scale_tensor = torch.tensor(scale_array, dtype=torch.float32)
+        image_tensor = torch.from_numpy(image_array).clone()
+        heatmap_tensor = torch.from_numpy(heatmap_array).clone()
+        attention_tensor = torch.from_numpy(attention_array).clone()
+        landmark_tensor = torch.from_numpy(landmark_array).clone()
+        landmark_original_tensor = torch.from_numpy(landmark_original_array).clone()
+        crop_tensor = torch.from_numpy(crop_array).clone()
+        scale_tensor = torch.from_numpy(scale_array).clone()
 
         return {
             "image": image_tensor,
@@ -337,7 +348,7 @@ class CervicalSpineDataset(Dataset):
             "crop_box": crop_tensor,
             "scale": scale_tensor,
             "variant": torch.tensor(float(variant), dtype=torch.float32),
-            "image_path": image_path.name,
+            # "image_path": image_path.name,  # Commented out: strings cannot be batched by DataLoader
         }
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
